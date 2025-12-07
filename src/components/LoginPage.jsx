@@ -1,101 +1,77 @@
 import React, { useState } from 'react';
 import './LoginPage.css';
-import { useNavigate } from "react-router-dom"; 
-
-// Admin credentials
-const ADMIN_CREDENTIALS = [
-  { username: 'superadmin', password: 'SuperAdmin@123', role: 'Super Admin' },
-  { username: 'admin1', password: 'Admin1@pass', role: 'Admin' },
-  { username: 'admin2', password: 'Admin2@pass', role: 'Admin' },
-  { username: 'admin3', password: 'Admin3@pass', role: 'Admin' },
-];
+import { useNavigate } from "react-router-dom";
+import { supabase } from '../supabaseClient';
 
 const LoginPage = () => {
-    const navigate = useNavigate(); 
+  const navigate = useNavigate();
   const [formData, setFormData] = useState({
-    username: '',
+    email: '',
     password: '',
   });
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [user, setUser] = useState(null);
+  const [isSignUp, setIsSignUp] = useState(false);
 
   const handleInputChange = (e) => {
-    const { name, value } = e. target;
+    const { name, value } = e.target;
     setFormData((prev) => ({
       ...prev,
       [name]: value,
     }));
     setError('');
+    setMessage('');
   };
 
-  const handleLogin = (e) => {
-    e. preventDefault();
+  const handleAuth = async (e) => {
+    e.preventDefault();
     setIsLoading(true);
     setError('');
+    setMessage('');
 
-    // Simulate API call delay
-    setTimeout(() => {
-      const admin = ADMIN_CREDENTIALS.find(
-        (cred) => cred.username === formData.username && cred.password === formData. password
-      );
-
-      if (admin) {
-        setUser({
-          username: admin.username,
-          role: admin.role,
+    try {
+      if (isSignUp) {
+        const { error } = await supabase.auth.signUp({
+          email: formData.email,
+          password: formData.password,
         });
-        setFormData({ username: '', password: '' });
-        console.log('Login successful:', admin);
-         navigate("/dashboard"); 
+        if (error) throw error;
+        setMessage('Check your email for the confirmation link!');
       } else {
-        setError('Invalid username or password');
+        const { error } = await supabase.auth.signInWithPassword({
+          email: formData.email,
+          password: formData.password,
+        });
+        if (error) throw error;
+        navigate("/dashboard");
       }
+    } catch (err) {
+      setError(err.message);
+    } finally {
       setIsLoading(false);
-    }, 1000);
+    }
   };
-
-  const handleLogout = () => {
-    setUser(null);
-    setFormData({ username: '', password: '' });
-    setError('');
-  };
-
-  if (user) {
-    return (
-      <div className="login-container">
-        <div className="success-card">
-          <div className="success-icon">✓</div>
-          <h2>Welcome, {user.username}!</h2>
-          <p className="role-badge">{user.role}</p>
-          <p>You have successfully logged in.</p>
-          <button className="Ok-btn">
-            OK
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="login-container">
       <div className="login-card">
         <div className="login-header">
-          <h1>Login</h1>
-          <p className="subtitle">Access for Super Admin and Admin</p>
+          <h1>{isSignUp ? 'Sign Up' : 'Login'}</h1>
+          <p className="subtitle">{isSignUp ? 'Create a new account' : 'Access your account'}</p>
         </div>
 
-        <form onSubmit={handleLogin} className="login-form">
+        <form onSubmit={handleAuth} className="login-form">
           <div className="form-group">
-            <label htmlFor="username">Username</label>
+            <label htmlFor="email">Email</label>
             <input
-              type="text"
-              id="username"
-              name="username"
-              value={formData.username}
+              type="email"
+              id="email"
+              name="email"
+              value={formData.email}
               onChange={handleInputChange}
-              placeholder="Enter your username"
+              placeholder="Enter your email"
               disabled={isLoading}
               required
             />
@@ -113,6 +89,7 @@ const LoginPage = () => {
                 placeholder="Enter your password"
                 disabled={isLoading}
                 required
+                minLength={6}
               />
               <button
                 type="button"
@@ -125,13 +102,22 @@ const LoginPage = () => {
           </div>
 
           {error && <div className="error-message">{error}</div>}
+          {message && <div className="success-message" style={{ color: 'green', marginBottom: '1rem' }}>{message}</div>}
 
           <button type="submit" className="login-btn" disabled={isLoading}>
-            {isLoading ? 'Logging in.. .' : 'Login'}
+            {isLoading ? 'Processing...' : (isSignUp ? 'Sign Up' : 'Login')}
           </button>
-        </form>
 
-        
+          <div style={{ marginTop: '1rem', textAlign: 'center' }}>
+            <button
+              type="button"
+              onClick={() => setIsSignUp(!isSignUp)}
+              style={{ background: 'none', border: 'none', color: '#007bff', cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              {isSignUp ? 'Already have an account? Login' : "Don't have an account? Sign Up"}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

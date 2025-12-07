@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useAuth } from '../authContext';
+import { supabase } from '../supabaseClient';
 
 // --- Configuration Constants ---
 const LOCAL_STORAGE_KEY = 'timetable_config_react_v6_divisions';
@@ -41,8 +43,9 @@ const initialConfig = {
   rooms: ['C-101', 'C-102', 'L-201', 'L-202', 'L-203'],
   // divisions represent different groups/classes that need separate timetables
   divisions: ['A', 'B'],
+  labDays: ['Tuesday', 'Thursday'],
   subjects: [
-    { id: 1, name: 'Data Structures', type: 'Theory', count: 4,  faculty: 'T-Faculty 1' },
+    { id: 1, name: 'Data Structures', type: 'Theory', count: 4, faculty: 'T-Faculty 1' },
     { id: 2, name: 'Operating Systems', type: 'Theory', count: 4, faculty: 'T-Faculty 2' },
     { id: 3, name: 'DBMS', type: 'Theory', count: 4, faculty: 'T-Faculty 3' },
     { id: 4, name: 'Algorithms', type: 'Theory', count: 4, faculty: 'T-Faculty 4' },
@@ -66,7 +69,7 @@ const hashCode = (str) => {
 
 // Mulberry32 PRNG
 const mulberry32 = (a) => {
-  return function() {
+  return function () {
     let t = (a += 0x6D2B79F5);
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
@@ -159,14 +162,20 @@ const generateTimetable = (config, division = null, globalDayUsage = null) => {
   let warning = '';
 
   // Today's ISO date for deterministic seeding across runs for same day
-  const todayISO = new Date().toISOString().slice(0,10);
+  const todayISO = new Date().toISOString().slice(0, 10);
 
   for (let d = 0; d < workingDays; d++) {
     const day = daysArray[d];
     let daySchedule = [];
     let facultyUsedToday = new Set();
     let theoryCountToday = 0;
+    let labCountToday = 0;
     let currentTime = scheduleType === 'Morning' ? MORNING_START_MINUTES : EVENING_START_MINUTES;
+
+    // Determine periods for this day (User Request: Lab Days = 6 (or config limit), Non-Lab = 4)
+    // If labDays is not defined (legacy), assume all are allowed.
+    const isLabDay = !config.labDays || config.labDays.length === 0 || config.labDays.includes(day);
+    const dailyMaxPeriods = isLabDay ? periodsPerDay : 4;
 
     // If division provided, create a deterministic seed per division/day; otherwise randomize daily
     const seedBase = division ? `${todayISO}-${day}-${division}` : `${Math.random() + ''}-${Date.now()}`;
@@ -217,7 +226,7 @@ const generateTimetable = (config, division = null, globalDayUsage = null) => {
 
     // Iterate logical periods and insert breaks at correct positions
     let lp = 1;
-    while (lp <= periodsPerDay) {
+    while (lp <= dailyMaxPeriods) {
       // Insert mini break before P3 (i.e., after P2)
       if (lp === 3) {
         daySchedule.push({
@@ -258,27 +267,38 @@ const generateTimetable = (config, division = null, globalDayUsage = null) => {
       // Build available subject pools (counts > 0)
       const availableSubjects = combinedSubjects.filter(s => (requiredCounts[s.name] || 0) > 0);
 
-      // Prefer labs when possible: lab must have lp+1 <= periodsPerDay (i.e., two consecutive logical periods)
-      const canFitLab = (lp + 1) <= periodsPerDay;
+      // Prefer labs when possible: lab must have lp+1 <= dailyMaxPeriods (i.e., two consecutive logical periods)
+      // AND today must be a Lab Day
+      // AND lab must start at valid block start (1, 3, 5) to not cross breaks (Mini Break at 3, Lunch at 5)
+      // AND no lab scheduled yet today
+      const validLabStart = [1, 3, 5].includes(lp);
+      const canFitLab = isLabDay && validLabStart && (lp + 1) <= dailyMaxPeriods && labCountToday === 0;
 
       if (canFitLab) {
         // try lab candidates first that have count remaining and whose faculty/room don't clash
         const labCandidates = availableSubjects.filter(s => s.type === 'Lab');
+        console.log(`[Day ${day} P${lp}] Lab Candidates: ${labCandidates.map(c => c.name).join(', ')}`);
+
         // attempt labs in seeded order
         const labPool = seededShuffle(labCandidates, seed ^ (lp * 101));
         for (const lb of labPool) {
           if (facultyUsedToday.has(lb.faculty)) continue; // avoid same faculty twice a day locally
           if (hasGlobalClash(lb.faculty, null, lp, 2)) continue; // faculty busy in global map
-          // pick a lab room not globally used for either lp or lp+1
-          const labRooms = rooms.filter(r => r.startsWith('L-'));
+          // Smart Room Detection: Look for 'L-' or 'Lab' (case-insensitive)
+          let labRooms = rooms.filter(r => /l-|lab/i.test(r));
+          if (labRooms.length === 0) labRooms = rooms;
+
           const shuffledLabRooms = seededShuffle(labRooms, hashCode(`${seedBase}-${lb.name}-${lp}`));
           const roomChoice = shuffledLabRooms.find(r => !hasGlobalClash(null, r, lp, 2));
-          if (!roomChoice) continue;
+          if (!roomChoice) {
+            continue;
+          }
           // we found a lab to schedule
           subjectToSchedule = lb;
           selectedRoom = roomChoice;
           span = 2;
           break;
+
         }
       }
 
@@ -301,7 +321,11 @@ const generateTimetable = (config, division = null, globalDayUsage = null) => {
           }
           if (chosenTheory) {
             subjectToSchedule = chosenTheory;
-            selectedRoom = (rooms.filter(r => r.startsWith('C-')).length ? seededShuffle(rooms.filter(r => r.startsWith('C-')), hashCode(`${seedBase}-class-${lp}`))[0] : 'Class Room');
+            // Smart Class Detection: Prefer non-lab rooms, else any room
+            let classRooms = rooms.filter(r => !/l-|lab/i.test(r));
+            if (classRooms.length === 0) classRooms = rooms;
+
+            selectedRoom = (classRooms.length ? seededShuffle(classRooms, hashCode(`${seedBase}-class-${lp}`))[0] : rooms[0] || 'Class Room');
             span = 1;
           }
         }
@@ -313,14 +337,18 @@ const generateTimetable = (config, division = null, globalDayUsage = null) => {
         const anyTheory = subjects.filter(s => s.type === 'Theory' && (requiredCounts[s.name] || 0) > 0);
         if (anyTheory.length) {
           subjectToSchedule = anyTheory[0];
-          selectedRoom = (rooms.filter(r => r.startsWith('C-')).length ? seededShuffle(rooms.filter(r => r.startsWith('C-')), hashCode(`${seedBase}-class-fallback-${lp}`))[0] : 'Class Room');
+          let classRooms = rooms.filter(r => !/l-|lab/i.test(r));
+          if (classRooms.length === 0) classRooms = rooms;
+          selectedRoom = (classRooms.length ? seededShuffle(classRooms, hashCode(`${seedBase}-class-fallback-${lp}`))[0] : rooms[0] || 'Class Room');
           span = 1;
         } else {
-          const anyLab = subjects.filter(s => s.type === 'Lab' && (requiredCounts[s.name] || 0) > 0 && (lp + 1) <= periodsPerDay);
+          const anyLab = subjects.filter(s => s.type === 'Lab' && (requiredCounts[s.name] || 0) > 0 && isLabDay && validLabStart && (lp + 1) <= dailyMaxPeriods && labCountToday === 0);
           if (anyLab.length) {
             // pick first available lab room that doesn't clash globally
             for (const lb of seededShuffle(anyLab, seed ^ (lp * 171))) {
-              const labRooms = rooms.filter(r => r.startsWith('L-'));
+              let labRooms = rooms.filter(r => /l-|lab/i.test(r));
+              if (labRooms.length === 0) labRooms = rooms;
+
               const shuffledLabRooms = seededShuffle(labRooms, hashCode(`${seedBase}-${lb.name}-fallback-${lp}`));
               const rc = shuffledLabRooms.find(r => !hasGlobalClash(null, r, lp, 2));
               if (rc) {
@@ -357,7 +385,8 @@ const generateTimetable = (config, division = null, globalDayUsage = null) => {
 
         // Update local & global usage
         facultyUsedToday.add(subjectToSchedule.faculty);
-        if (!isLab) theoryCountToday++;
+        if (isLab) labCountToday++;
+        else theoryCountToday++;
 
         if (globalDayUsage) {
           for (let occ = lp; occ < lp + span; occ++) {
@@ -374,10 +403,10 @@ const generateTimetable = (config, division = null, globalDayUsage = null) => {
         // No subject to schedule -> Free Period
         daySchedule.push({
           period: lp,
-          type: 'free',
-          name: 'Free Period',
-          teacher: 'N/A',
-          room: 'N/A',
+          type: '---',
+          name: '---',
+          teacher: '---',
+          room: '---',
           startTime: formatTime(currentTime),
           endTime: formatTime(currentTime + PERIOD_DURATION),
           duration: PERIOD_DURATION,
@@ -401,6 +430,39 @@ const generateTimetable = (config, division = null, globalDayUsage = null) => {
 };
 
 // --- Sub-Components ---
+const DaySelector = ({ days, selectedDays, onChange }) => {
+  const toggleDay = (day) => {
+    const newSelected = selectedDays.includes(day)
+      ? selectedDays.filter(d => d !== day)
+      : [...selectedDays, day];
+    onChange(newSelected);
+  };
+
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-700 mb-2">Lab Days (6 Periods)</label>
+      <div className="flex flex-wrap gap-2">
+        {days.map(day => {
+          const isSelected = selectedDays.includes(day);
+          return (
+            <button
+              key={day}
+              type="button"
+              onClick={() => toggleDay(day)}
+              className={`px-3 py-1 rounded-full text-xs font-semibold border transition-colors ${isSelected
+                ? 'bg-purple-600 text-white border-purple-600'
+                : 'bg-white text-gray-600 border-gray-300 hover:border-purple-300'
+                }`}
+            >
+              {day.slice(0, 3)}
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-xs text-gray-500 mt-1">Selected days will have 6 periods and allow Labs accordingly.</p>
+    </div>
+  );
+};
 const Dropdown = ({ name, label, options, value, onChange }) => (
   <div>
     <label htmlFor={name} className="block text-sm font-medium text-gray-700">{label}</label>
@@ -651,6 +713,7 @@ const App = () => {
   const [scheduleMap, setScheduleMap] = useState({});
   const [message, setMessage] = useState(null);
   const [resourcesLoaded, setResourcesLoaded] = useState(false);
+  const { user } = useAuth();
   const [activeDivision, setActiveDivision] = useState(initialConfig.divisions[0] || 'A');
 
   // Dynamic Script & Styles Loader (Tailwind and Lucide Icons)
@@ -691,42 +754,95 @@ const App = () => {
       .catch(err => console.error("Error loading lucide:", err));
   }, []);
 
-  // Load initial config from local storage
+  // Load initial config from local storage or Supabase
   useEffect(() => {
-    const storedData = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (storedData) {
-      try {
-        const data = JSON.parse(storedData) || {};
-        let loadedConfig = data.config || {};
+    const loadData = async () => {
+      let loadedFromSupabase = false;
 
-        if (loadedConfig.subjects) {
-          loadedConfig.subjects = loadedConfig.subjects.map(s => ({ ...s, faculty: s.faculty || 'Unassigned' }));
-        }
-        if (loadedConfig.teachers && loadedConfig.teachers.length > MAX_TEACHERS) {
-          loadedConfig.teachers = loadedConfig.teachers.slice(0, MAX_TEACHERS);
-        }
-        if (!loadedConfig.divisions || !Array.isArray(loadedConfig.divisions) || loadedConfig.divisions.length === 0) {
-          loadedConfig.divisions = initialConfig.divisions;
-        }
+      // Try loading from Supabase first if user is logged in
+      if (user) {
+        try {
+          const { data, error } = await supabase
+            .from('timetables')
+            .select('config, schedule_map')
+            .eq('user_id', user.id)
+            .single();
 
-        setConfig(prevConfig => ({ ...prevConfig, ...loadedConfig }));
-        // schedule may be legacy (array) or map
-        if (data.schedule && typeof data.schedule === 'object' && !Array.isArray(data.schedule)) {
-          setScheduleMap(data.schedule);
-          const firstDiv = (loadedConfig.divisions && loadedConfig.divisions[0]) || Object.keys(data.schedule)[0];
-          setActiveDivision(firstDiv);
-        } else if (Array.isArray(data.schedule)) {
-          // legacy single schedule fallback; map to first division
-          const div = loadedConfig.divisions ? loadedConfig.divisions[0] : 'A';
-          setScheduleMap({ [div]: data.schedule });
-          setActiveDivision(div);
+          if (data && !error) {
+            // Found data in Supabase
+            console.log("Loaded from Supabase:", data);
+
+            // Rehydrate config
+            let loadedConfig = data.config || {};
+            // Fix unassigned faculty
+            if (loadedConfig.subjects) {
+              loadedConfig.subjects = loadedConfig.subjects.map(s => ({ ...s, faculty: s.faculty || 'Unassigned' }));
+            }
+            if (loadedConfig.teachers && loadedConfig.teachers.length > MAX_TEACHERS) {
+              loadedConfig.teachers = loadedConfig.teachers.slice(0, MAX_TEACHERS);
+            }
+            if (!loadedConfig.divisions || !Array.isArray(loadedConfig.divisions) || loadedConfig.divisions.length === 0) {
+              loadedConfig.divisions = initialConfig.divisions;
+            }
+
+            setConfig(prevConfig => ({ ...prevConfig, ...loadedConfig }));
+
+            // Rehydrate scheduleMap
+            if (data.schedule_map) {
+              setScheduleMap(data.schedule_map);
+              const firstDiv = (loadedConfig.divisions && loadedConfig.divisions[0]) || Object.keys(data.schedule_map)[0];
+              setActiveDivision(firstDiv);
+            }
+
+            loadedFromSupabase = true;
+            setMessage({ type: 'success', text: 'Configuration loaded from cloud.' });
+          }
+        } catch (err) {
+          console.error("Supabase load error:", err);
         }
-        setMessage({ type: 'success', text: 'Configuration loaded.' });
-      } catch (e) {
-        console.error("Error loading:", e);
       }
-    }
-  }, []);
+
+      // Fallback to Local Storage if not loaded from Supabase
+      if (!loadedFromSupabase) {
+        setDebugLog(prev => [...prev, `Falling back to Local Storage.`]);
+        const storedData = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (storedData) {
+          try {
+            const data = JSON.parse(storedData) || {};
+            let loadedConfig = data.config || {};
+
+            if (loadedConfig.subjects) {
+              loadedConfig.subjects = loadedConfig.subjects.map(s => ({ ...s, faculty: s.faculty || 'Unassigned' }));
+            }
+            if (loadedConfig.teachers && loadedConfig.teachers.length > MAX_TEACHERS) {
+              loadedConfig.teachers = loadedConfig.teachers.slice(0, MAX_TEACHERS);
+            }
+            if (!loadedConfig.divisions || !Array.isArray(loadedConfig.divisions) || loadedConfig.divisions.length === 0) {
+              loadedConfig.divisions = initialConfig.divisions;
+            }
+
+            setConfig(prevConfig => ({ ...prevConfig, ...loadedConfig }));
+            // schedule may be legacy (array) or map
+            if (data.schedule && typeof data.schedule === 'object' && !Array.isArray(data.schedule)) {
+              setScheduleMap(data.schedule);
+              const firstDiv = (loadedConfig.divisions && loadedConfig.divisions[0]) || Object.keys(data.schedule)[0];
+              setActiveDivision(firstDiv);
+            } else if (Array.isArray(data.schedule)) {
+              // legacy single schedule fallback; map to first division
+              const div = loadedConfig.divisions ? loadedConfig.divisions[0] : 'A';
+              setScheduleMap({ [div]: data.schedule });
+              setActiveDivision(div);
+            }
+            if (!user) setMessage({ type: 'success', text: 'Configuration loaded from local storage.' });
+          } catch (e) {
+            console.error("Error loading:", e);
+          }
+        }
+      }
+    };
+
+    loadData();
+  }, [user]);
 
   // --- Handlers ---
   const handleConfigChange = useCallback((e) => {
@@ -738,6 +854,7 @@ const App = () => {
         newValue = parseInt(value, 10);
       }
       let updatedConfig = { ...prev, [name]: newValue };
+      if (type === 'custom') updatedConfig[name] = value;
       if (name === 'semesterType') {
         const availableSemesters = SEMESTER_MAP[newValue];
         if (!availableSemesters.includes(prev.semester)) {
@@ -802,18 +919,41 @@ const App = () => {
     }));
   }, []);
 
-  const handleSaveConfig = () => {
-    try {
-      const dataToSave = { config, schedule: scheduleMap, lastUpdated: new Date().toISOString() };
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(dataToSave));
-      setMessage({ type: 'success', text: 'Configuration saved locally!' });
+  const handleSaveConfig = async () => {
+    const dataToSave = { config, schedule: scheduleMap, lastUpdated: new Date().toISOString() };
 
-      // remove focus from active element to avoid any focus-driven scroll/zoom
-      if (document.activeElement && typeof document.activeElement.blur === 'function') {
-        document.activeElement.blur();
-      }
+    // Always save to local storage as backup/offline
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(dataToSave));
+      setMessage({ type: 'success', text: 'Configuration saved locally.' });
     } catch (error) {
-      setMessage({ type: 'error', text: 'Error saving configuration.' });
+      console.error("Local save error", error);
+    }
+
+    // If logged in, save to Supabase
+    if (user) {
+      setMessage({ type: 'info', text: 'Saving to cloud...' });
+      try {
+        const { error } = await supabase
+          .from('timetables')
+          .upsert({
+            user_id: user.id,
+            config: config,
+            schedule_map: scheduleMap,
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'user_id' });
+
+        if (error) throw error;
+        setMessage({ type: 'success', text: 'Configuration saved to cloud successfully!' });
+      } catch (err) {
+        console.error("Supabase save error:", err);
+        setMessage({ type: 'warning', text: 'Saved locally, but cloud save failed: ' + err.message });
+      }
+    }
+
+    // remove focus from active element to avoid any focus-driven scroll/zoom
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
     }
   };
 
@@ -1008,6 +1148,11 @@ const App = () => {
                   onRemove={removeSimpleArrayItem}
                 />
               </div>
+              <DaySelector
+                days={DAYS}
+                selectedDays={config.labDays || []}
+                onChange={(newDays) => handleConfigChange({ target: { name: 'labDays', value: newDays, type: 'custom' } })}
+              />
             </div>
           </div>
         </div>

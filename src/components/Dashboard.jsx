@@ -100,11 +100,11 @@ const Dashboard = () => {
     };
 
     const overviewData = [
-        { id: 1, title: 'Total Class', count: dashboardData.totalClass, icon: '📚', color: '#FF6B6B', panel: 'class' },
-        { id: 2, title: 'Total Faculty', count: dashboardData.totalFaculty, icon: '👨‍🏫', color: '#4ECDC4', panel: 'faculty' },
-        { id: 3, title: 'Total Subjects', count: dashboardData.totalSubjects, icon: '📖', color: '#45B7D1', panel: 'subject' },
-        { id: 4, title: 'Class Rooms/Labs', count: dashboardData.totalClassrooms, icon: '🏛️', color: '#96CEB4', panel: 'room' },
-        { id: 5, title: 'Timetables Created', count: dashboardData.timetablesCreated, icon: '📅', color: '#FFEAA7' },
+        { id: 1, title: 'Total Class', count: dashboardData.totalClass,color: '#FF6B6B', panel: 'class' },
+        { id: 2, title: 'Total Faculty', count: dashboardData.totalFaculty, color: '#4ECDC4', panel: 'faculty' },
+        { id: 3, title: 'Total Subjects', count: dashboardData.totalSubjects, color: '#45B7D1', panel: 'subject' },
+        { id: 4, title: 'Class Rooms/Labs', count: dashboardData.totalClassrooms, color: '#96CEB4', panel: 'room' },
+        { id: 5, title: 'Timetables Created', count: dashboardData.timetablesCreated, color: '#FFEAA7' },
     ];
 
     const renderPanel = () => {
@@ -249,7 +249,6 @@ const Dashboard = () => {
                 <div className="stats-panel">
                     <div className="panel-header">
                         <h2>Statistics</h2>
-                        <button className="refresh-btn">🔄 Refresh</button>
                     </div>
                     <div className="cards-flex">
                         {overviewData.map(item => (
